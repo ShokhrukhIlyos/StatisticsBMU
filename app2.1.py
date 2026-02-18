@@ -11,6 +11,11 @@ import plotly.express as px
 from dash import Dash, dcc, html, Input, Output
 import dash_bootstrap_components as dbc
 
+import os
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "8050"))
+    app.run(host="0.0.0.0", port=port, debug=False)
 
 DATA_FILE = Path("StudentModuleMarksProgramEnrollment.csv")
 
@@ -569,3 +574,4 @@ def update_dashboard(programs, scorebands, tiers, metrics, top_n, sort_order, mo
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=False)
+
