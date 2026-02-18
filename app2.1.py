@@ -5,17 +5,9 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import numpy as np
-
 import plotly.express as px
+import streamlit as st
 
-from dash import Dash, dcc, html, Input, Output
-import dash_bootstrap_components as dbc
-
-import os
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8050"))
-    app.run(host="0.0.0.0", port=port, debug=False)
 
 DATA_FILE = Path("StudentModuleMarksProgramEnrollment.csv")
 
@@ -65,29 +57,21 @@ def detect_and_read_file(path: Path) -> pd.DataFrame:
     return df
 
 
-# ----------------------------
-# Data
-# ----------------------------
 def load_and_clean(path: Path) -> pd.DataFrame:
     df = detect_and_read_file(path)
 
     required = {"StudentID", "ProgramName", "ModuleCode", "ModuleName", "TotalMark", "TotalGrade"}
     missing = sorted(list(required - set(df.columns)))
     if missing:
-        raise ValueError(
-            f"Missing required columns: {missing}\n"
-            f"Found columns: {list(df.columns)}"
-        )
+        raise ValueError(f"Missing required columns: {missing}\nFound columns: {list(df.columns)}")
 
     df = _clean_text(df, ["StudentID", "ProgramName", "ModuleCode", "ModuleName", "TotalGrade"])
 
-    # TotalMark
     df["TotalMark"] = pd.to_numeric(df["TotalMark"], errors="coerce")
 
-    # REMOVE ALL NS: drop rows where TotalMark is missing
+    # remove NS
     df = df.dropna(subset=["TotalMark"]).copy()
 
-    # Module label
     df["ModuleLabel"] = (
         df["ModuleCode"].astype("string").fillna("").str.strip()
         + " — "
@@ -95,24 +79,19 @@ def load_and_clean(path: Path) -> pd.DataFrame:
     )
     df.loc[df["ModuleLabel"].str.strip().isin(["", "—", " — "]), "ModuleLabel"] = pd.NA
 
-    # Score bands (no NS exists now)
     bins = [0, 25, 50, 75, 100.0000001]
     labels = ["0-25", "25-50", "50-75", "75-100"]
     df["ScoreRangeBand"] = pd.cut(df["TotalMark"], bins=bins, labels=labels, include_lowest=True)
 
-    # GradePie (no NS)
+    # GradePie
     m = df["TotalMark"]
     grade = pd.Series(pd.NA, index=df.index, dtype="string")
-
-    # A* based on mark>=80
     grade.loc[m >= 80] = "A*"
 
-    # use TotalGrade if present
     g = df["TotalGrade"].astype("string").str.strip().str.upper()
     use_grade = g.notna() & (g != "")
     grade.loc[grade.isna() & use_grade] = g.loc[grade.isna() & use_grade]
 
-    # fallback from mark where TotalGrade missing
     need_fallback = grade.isna()
     mm = m.loc[need_fallback]
     grade.loc[need_fallback & (mm >= 70)] = "A"
@@ -123,7 +102,6 @@ def load_and_clean(path: Path) -> pd.DataFrame:
     grade.loc[need_fallback & (mm < 30)] = "F"
 
     df["GradePie"] = grade
-
     return df
 
 
@@ -131,7 +109,7 @@ def program_metrics(df: pd.DataFrame) -> pd.DataFrame:
     g = df.groupby("ProgramName", dropna=False)["TotalMark"]
     out = g.agg(
         Min="min",
-        Mean="mean",       # average
+        Mean="mean",
         Median="median",
         Max="max",
         StdDev="std",
@@ -176,402 +154,232 @@ def module_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def kpi_card(title: str, value: str, icon: str = "✅"):
-    return dbc.Card(
-        dbc.CardBody([
-            html.Div(title, style={"color": "#6b7280", "fontSize": "12px"}),
-            html.Div([html.Span(icon, style={"marginRight": "6px"}), value],
-                     style={"fontSize": "22px", "fontWeight": "700"})
-        ]),
-        className="shadow-sm",
-        style={"borderRadius": "14px"}
-    )
-
-
 # ----------------------------
-# App start
+# Streamlit UI
 # ----------------------------
+st.set_page_config(page_title="Academic Program Performance Dashboard", layout="wide")
+st.title("Academic Program Performance Dashboard")
+
 if not DATA_FILE.exists():
-    raise FileNotFoundError(f"File not found: {DATA_FILE.resolve()}")
+    st.error(f"File not found: {DATA_FILE.resolve()}")
+    st.stop()
 
 df_raw = load_and_clean(DATA_FILE)
 df_prog = program_metrics(df_raw)
 
 data_updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+st.caption(f"✔ Data Updated: {data_updated} • Data Source: StudentID | ProgramName | ModuleCode | ModuleName | TotalMark | TotalGrade")
 
-app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
-app.title = "Academic Program Performance Dashboard"
-
-program_options = sorted([p for p in df_prog["ProgramName"].dropna().unique().tolist()])
+program_options = sorted(df_prog["ProgramName"].dropna().unique().tolist())
 score_band_options = ["0-25", "25-50", "50-75", "75-100"]
 tier_options = ["Below Average", "Average", "Good", "Excellent"]
-metric_options = ["Min", "Median", "Mean", "Max", "Mid", "StdDev"]
 
-sidebar = dbc.Card(
-    dbc.CardBody([
-        html.H5("Filters", style={"fontWeight": "700"}),
+with st.sidebar:
+    st.header("Filters")
+    f_program = st.multiselect("Program Name", program_options, default=program_options)
+    f_scoreband = st.multiselect("Score Range", score_band_options, default=score_band_options)
+    f_tier = st.multiselect("Performance Tier", tier_options, default=tier_options)
+    top_n = st.slider("Top N", 5, 20, 10, 1)
+    sort_order = st.selectbox("Sort Order (Mean)", ["desc", "asc"], index=0)
 
-        html.Div("Program Name", className="mt-2", style={"fontSize": "12px", "color": "#6b7280"}),
-        dcc.Dropdown(
-            id="f_program",
-            options=[{"label": p, "value": p} for p in program_options],
-            value=program_options,
-            multi=True
-        ),
+# Apply filters
+dff_raw = df_raw.copy()
+if f_program:
+    dff_raw = dff_raw[dff_raw["ProgramName"].isin(f_program)]
+if f_scoreband:
+    dff_raw = dff_raw[dff_raw["ScoreRangeBand"].isin(f_scoreband)]
 
-        html.Div("Score Range", className="mt-3", style={"fontSize": "12px", "color": "#6b7280"}),
-        dcc.Dropdown(
-            id="f_scoreband",
-            options=[{"label": s, "value": s} for s in score_band_options],
-            value=score_band_options,
-            multi=True
-        ),
+dff = df_prog.copy()
+if f_program:
+    dff = dff[dff["ProgramName"].isin(f_program)]
+if f_tier:
+    dff = dff[dff["PerformanceTier"].isin(f_tier)]
 
-        html.Div("Performance Tier", className="mt-3", style={"fontSize": "12px", "color": "#6b7280"}),
-        dcc.Dropdown(
-            id="f_tier",
-            options=[{"label": t, "value": t} for t in tier_options],
-            value=tier_options,
-            multi=True
-        ),
+dff = dff.sort_values("Mean", ascending=(sort_order == "asc"), na_position="last")
 
-        html.Div("Metric Type", className="mt-3", style={"fontSize": "12px", "color": "#6b7280"}),
-        dcc.Dropdown(
-            id="f_metric",
-            options=[{"label": m, "value": m} for m in metric_options],
-            value=["Min", "Median", "Mean", "Max"],
-            multi=True
-        ),
+# KPIs
+col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 2])
+col1.metric("Total Programs", int(dff["ProgramName"].nunique()))
+col2.metric("Average (Mean) Score", f"{dff['Mean'].mean():.2f}" if len(dff) else "—")
+col3.metric("Highest Max Score", f"{dff['Max'].max():.2f}" if len(dff) else "—")
+col4.metric("Average StdDev", f"{dff['StdDev'].mean():.2f}" if len(dff) else "—")
+col5.metric("Records Used", f"{len(dff_raw):,}")
 
-        html.Hr(),
-        html.Div("Top N", style={"fontSize": "12px", "color": "#6b7280"}),
-        dcc.Slider(id="top_n", min=5, max=20, step=1, value=10,
-                   marks={5: "5", 10: "10", 15: "15", 20: "20"}),
+# Charts
+st.subheader("Score Distribution Trend by Program (Median)")
 
-        html.Div("Sort Order (Mean)", className="mt-3", style={"fontSize": "12px", "color": "#6b7280"}),
-        dcc.Dropdown(
-            id="sort_order",
-            options=[{"label": "Mean Descending", "value": "desc"}, {"label": "Mean Ascending", "value": "asc"}],
-            value="desc",
-            clearable=False
-        ),
-    ]),
-    className="shadow-sm",
-    style={"borderRadius": "14px"}
+# ✅ sort by Median decreasing so the line goes down
+dff_trend = (
+    dff.dropna(subset=["Median"])
+      .sort_values("Median", ascending=False)
 )
 
-header = dbc.Card(
-    dbc.CardBody([
-        html.H3("Academic Program Performance Dashboard", style={"fontWeight": "800", "marginBottom": "6px"}),
-        html.Div([
-            html.Span("✔ Data Updated: ", style={"fontWeight": "600"}),
-            html.Span(data_updated),
-            html.Span("   •   "),
-            html.Span("🗄 Data Source: StudentID | ProgramName | ModuleCode | ModuleName | TotalMark | TotalGrade"),
-        ], style={"color": "#6b7280", "fontSize": "13px"})
-    ]),
-    className="shadow-sm",
-    style={"borderRadius": "14px"}
+fig_trend = px.line(
+    dff_trend,
+    x="ProgramName",
+    y="Median",
+    markers=True,
+    title=""
 )
-
-app.layout = dbc.Container(fluid=True, children=[
-    dbc.Row([dbc.Col(header, width=12)], className="mt-3"),
-
-    dbc.Row([
-        dbc.Col(sidebar, width=3, className="mt-3"),
-
-        dbc.Col([
-            dbc.Row([
-                dbc.Col(html.Div(id="kpi1"), width=12, lg=2),
-                dbc.Col(html.Div(id="kpi2"), width=12, lg=2),
-                dbc.Col(html.Div(id="kpi3"), width=12, lg=2),
-                dbc.Col(html.Div(id="kpi4"), width=12, lg=2),
-                dbc.Col(html.Div(id="kpi5"), width=12, lg=4),
-            ], className="mt-3 g-2"),
-
-            dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Score Distribution Trend by Program", style={"fontWeight": "700"}),
-                    dcc.Graph(id="g_trend", config={"displayModeBar": False})
-                ]), className="shadow-sm", style={"borderRadius": "14px"}), width=12),
-            ], className="mt-3"),
-
-            dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Top Programs by Mean Score (Average)", style={"fontWeight": "700"}),
-                    dcc.Graph(id="g_top_mean", config={"displayModeBar": False})
-                ]), className="shadow-sm", style={"borderRadius": "14px"}), width=6),
-
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Standard Deviation by Program", style={"fontWeight": "700"}),
-                    dcc.Graph(id="g_stddev", config={"displayModeBar": False})
-                ]), className="shadow-sm", style={"borderRadius": "14px"}), width=6),
-            ], className="mt-3"),
-
-            dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Top Programs by Maximum Score", style={"fontWeight": "700"}),
-                    dcc.Graph(id="g_top_max", config={"displayModeBar": False})
-                ]), className="shadow-sm", style={"borderRadius": "14px"}), width=12),
-            ], className="mt-3"),
-
-            dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.Div(
-                        style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"},
-                        children=[
-                            html.H5("Module Statistics", style={"fontWeight": "700", "marginBottom": "0px"}),
-                            dcc.Dropdown(
-                                id="module_metric",
-                                options=[
-                                    {"label": "Mean", "value": "Mean"},
-                                    {"label": "Median", "value": "Median"},
-                                    {"label": "Min", "value": "Min"},
-                                    {"label": "Max", "value": "Max"},
-                                    {"label": "Mid (Min+Max)/2", "value": "Mid"},
-                                    {"label": "StdDev", "value": "StdDev"},
-                                ],
-                                value="Mean",
-                                clearable=False,
-                                style={"width": "220px"}
-                            )
-                        ]
-                    ),
-                    html.Div("Top modules ranked by selected metric (based on current filters).",
-                             style={"color": "#6b7280", "fontSize": "12px", "marginTop": "6px"}),
-                    dcc.Graph(id="g_module_stats", config={"displayModeBar": False}),
-                ]), className="shadow-sm", style={"borderRadius": "14px"}), width=12),
-            ], className="mt-3"),
-
-            dbc.Row([
-                dbc.Col(dbc.Card(dbc.CardBody([
-                    html.H5("Grade Distribution by Program", style={"fontWeight": "700"}),
-                    html.Div("Donut charts + grade legend with % on the right (no NS).",
-                             style={"color": "#6b7280", "fontSize": "12px"}),
-                    html.Div(id="grade_pie_grid")
-                ]), className="shadow-sm", style={"borderRadius": "14px"}), width=12),
-            ], className="mt-3"),
-
-        ], width=9)
-    ], className="g-3"),
-])
-
-
-@app.callback(
-    Output("kpi1", "children"),
-    Output("kpi2", "children"),
-    Output("kpi3", "children"),
-    Output("kpi4", "children"),
-    Output("kpi5", "children"),
-    Output("g_trend", "figure"),
-    Output("g_top_mean", "figure"),
-    Output("g_stddev", "figure"),
-    Output("g_top_max", "figure"),
-    Output("g_module_stats", "figure"),
-    Output("grade_pie_grid", "children"),
-    Input("f_program", "value"),
-    Input("f_scoreband", "value"),
-    Input("f_tier", "value"),
-    Input("f_metric", "value"),
-    Input("top_n", "value"),
-    Input("sort_order", "value"),
-    Input("module_metric", "value"),
+fig_trend.update_layout(
+    xaxis_title="Program Name",
+    yaxis_title="Median Mark",
+    xaxis_tickangle=-30
 )
-def update_dashboard(programs, scorebands, tiers, metrics, top_n, sort_order, module_metric):
-    programs = programs or []
-    scorebands = scorebands or []
-    tiers = tiers or []
-    metrics = metrics or []
+st.plotly_chart(fig_trend, use_container_width=True)
 
-    # Filter raw rows (no NS exists)
-    dff_raw = df_raw.copy()
-    if programs:
-        dff_raw = dff_raw[dff_raw["ProgramName"].isin(programs)]
-    if scorebands:
-        dff_raw = dff_raw[dff_raw["ScoreRangeBand"].isin(scorebands)]
 
-    # Program metrics filtered
-    dff = df_prog.copy()
-    if programs:
-        dff = dff[dff["ProgramName"].isin(programs)]
-    if tiers:
-        dff = dff[dff["PerformanceTier"].isin(tiers)]
+cA, cB = st.columns(2)
 
-    dff = dff.sort_values("Mean", ascending=(sort_order == "asc"), na_position="last")
-
-    # KPIs
-    total_programs = int(dff["ProgramName"].nunique())
-    avg_mean = float(dff["Mean"].mean()) if len(dff) else None
-    highest_max = float(dff["Max"].max()) if len(dff) else None
-    avg_std = float(dff["StdDev"].mean()) if len(dff) else None
-    records_used = int(len(dff_raw))
-
-    k1 = kpi_card("Total Programs", f"{total_programs}", "📌")
-    k2 = kpi_card("Average (Mean) Score", f"{avg_mean:.2f}" if avg_mean is not None else "—", "📈")
-    k3 = kpi_card("Highest Max Score", f"{highest_max:.2f}" if highest_max is not None else "—", "🏆")
-    k4 = kpi_card("Average StdDev", f"{avg_std:.2f}" if avg_std is not None else "—", "📊")
-    k5 = kpi_card("Records Used", f"{records_used:,}", "🧾")
-
-    # Trend metric (defaults to Mean)
-    show_metric = "Median" if ("Median" in metrics) else (metrics[0] if metrics else "Median")
-    fig_trend = px.bar(dff, x="ProgramName", y=show_metric, title="")
-    fig_trend.update_layout(margin=dict(l=10, r=10, t=10, b=10),
-                            xaxis_title="Program Name", yaxis_title=f"{show_metric} Mark")
-    fig_trend.update_traces(hovertemplate="<b>%{x}</b><br>" + f"{show_metric}: " + "%{y:.2f}<extra></extra>")
-
-    # Top mean
+with cA:
+    st.subheader("Top Programs by Mean Score (Average)")
     top_mean = dff.dropna(subset=["Mean"]).head(int(top_n))
     fig_top_mean = px.bar(top_mean.iloc[::-1], x="Mean", y="ProgramName", orientation="h", title="")
-    fig_top_mean.update_layout(margin=dict(l=10, r=10, t=10, b=10),
-                               xaxis_title="Mean (Average) Mark", yaxis_title="")
-    fig_top_mean.update_traces(hovertemplate="<b>%{y}</b><br>Mean: %{x:.2f}<extra></extra>")
+    st.plotly_chart(fig_top_mean, use_container_width=True)
 
-    # StdDev chart
-    std_df = dff.dropna(subset=["StdDev"]).head(int(top_n))
-    fig_std = px.bar(std_df.iloc[::-1], x="StdDev", y="ProgramName", orientation="h", title="")
-    fig_std.update_layout(margin=dict(l=10, r=10, t=10, b=10),
-                          xaxis_title="Standard Deviation", yaxis_title="")
-    fig_std.update_traces(hovertemplate="<b>%{y}</b><br>StdDev: %{x:.2f}<extra></extra>")
+with cB:
+    st.subheader("Standard Deviation by Program")
 
-    # Top max
-    top_max = dff.sort_values("Max", ascending=False, na_position="last").head(int(top_n)).dropna(subset=["Max"])
-    fig_top_max = px.bar(top_max.iloc[::-1], x="Max", y="ProgramName", orientation="h", title="")
-    fig_top_max.update_layout(margin=dict(l=10, r=10, t=10, b=10),
-                              xaxis_title="Max Mark", yaxis_title="")
-    fig_top_max.update_traces(hovertemplate="<b>%{y}</b><br>Max: %{x:.2f}<extra></extra>")
+    # ✅ Sort by StdDev descending
+    std_df = (
+        dff.dropna(subset=["StdDev"])
+            .sort_values("StdDev", ascending=False)
+            .head(int(top_n))
+    )
 
-    # Module stats
-    dff_mod = module_metrics(dff_raw).dropna(subset=[module_metric])
-    top_modules = dff_mod.sort_values(module_metric, ascending=False).head(15)
-
-    fig_module = px.bar(
-        top_modules.iloc[::-1],
-        x=module_metric,
-        y="ModuleLabel",
+    fig_std = px.bar(
+        std_df,
+        x="StdDev",
+        y="ProgramName",
         orientation="h",
         title=""
     )
-    fig_module.update_layout(margin=dict(l=10, r=10, t=10, b=10),
-                             xaxis_title=f"{module_metric}",
-                             yaxis_title="")
-    fig_module.update_traces(
-        customdata=top_modules.iloc[::-1][["Count", "Min", "Mean", "Median", "Max", "Mid", "StdDev"]].to_numpy(),
-        hovertemplate=(
-            "<b>%{y}</b><br>"
-            f"{module_metric}: %{{x:.2f}}<br>"
-            "Count: %{customdata[0]}<br>"
-            "Min: %{customdata[1]:.2f}<br>"
-            "Mean: %{customdata[2]:.2f}<br>"
-            "Median: %{customdata[3]:.2f}<br>"
-            "Max: %{customdata[4]:.2f}<br>"
-            "Mid: %{customdata[5]:.2f}<br>"
-            "StdDev: %{customdata[6]:.2f}<br>"
-            "<extra></extra>"
-        )
+
+    # Optional: highest at top
+    fig_std.update_layout(yaxis=dict(autorange="reversed"))
+
+    st.plotly_chart(fig_std, use_container_width=True)
+
+
+st.subheader("Top Programs by Maximum Score")
+top_max = dff.sort_values("Max", ascending=False, na_position="last").head(int(top_n)).dropna(subset=["Max"])
+fig_top_max = px.bar(top_max.iloc[::-1], x="Max", y="ProgramName", orientation="h", title="")
+st.plotly_chart(fig_top_max, use_container_width=True)
+
+st.subheader("Module Statistics")
+
+colA, colB = st.columns([2, 1])
+
+with colA:
+    module_metric = st.selectbox(
+        "Module Metric",
+        ["Mean", "Median", "Min", "Max", "Mid", "StdDev"],
+        index=0,
+        key="module_metric"
     )
 
-    # -------------------------
-    # Grade donut grid (no NS)  <-- IMPORTANT: INSIDE function
-    # -------------------------
-    grade_order = ["A*", "A", "B", "C", "D", "E", "F"]
-    grade_colors = {
-        "A*": "#2ca02c", "A": "#98df8a", "B": "#1f77b4", "C": "#9467bd",
-        "D": "#ff7f0e", "E": "#bcbd22", "F": "#d62728",
-    }
+with colB:
+    module_top_n = st.selectbox(
+        "Top N Modules",
+        [5, 10, 15, 20, 25, 50],
+        index=1,
+        key="module_top_n"
+    )
 
-    programs_to_draw = sorted([p for p in dff_raw["ProgramName"].dropna().unique().tolist()])
-    pie_cards = []
+dff_mod = module_metrics(dff_raw).dropna(subset=[module_metric])
 
-    for prog in programs_to_draw:
+top_modules = (
+    dff_mod.sort_values(module_metric, ascending=False)
+           .head(int(module_top_n))
+)
+
+# ✅ Increase chart height when module count increases
+dynamic_height = max(450, 40 * len(top_modules))
+
+fig_module = px.bar(
+    top_modules,
+    x=module_metric,
+    y="ModuleLabel",
+    orientation="h",
+    title=""
+)
+fig_module.update_layout(
+    yaxis=dict(autorange="reversed"),
+    height=dynamic_height,
+    margin=dict(l=10, r=10, t=30, b=10),
+)
+
+st.plotly_chart(fig_module, use_container_width=True)
+
+# Donuts
+st.subheader("Grade Distribution by Program")
+
+grade_order = ["A*", "A", "B", "C", "D", "E", "F"]
+grade_colors = {
+    "A*": "#2ca02c", "A": "#98df8a", "B": "#1f77b4", "C": "#9467bd",
+    "D": "#ff7f0e", "E": "#bcbd22", "F": "#d62728",
+}
+
+programs_to_draw = sorted(dff_raw["ProgramName"].dropna().unique().tolist())
+
+for i in range(0, len(programs_to_draw), 2):
+    row_cols = st.columns(2)
+
+    for j in range(2):
+        idx = i + j
+        if idx >= len(programs_to_draw):
+            break
+
+        prog = programs_to_draw[idx]
         prog_df = dff_raw[dff_raw["ProgramName"] == prog]
+
         counts = prog_df["GradePie"].value_counts().reindex(grade_order, fill_value=0)
-        total = int(counts.sum())
+        total = int(counts.sum()) if int(counts.sum()) > 0 else 1
 
         grade_counts = counts.reset_index()
         grade_counts.columns = ["Grade", "Count"]
 
-        # Force order for plotly
+        # Force order
         grade_counts["Grade"] = pd.Categorical(
-            grade_counts["Grade"],
-            categories=grade_order,
-            ordered=True
+            grade_counts["Grade"], categories=grade_order, ordered=True
         )
         grade_counts = grade_counts.sort_values("Grade")
 
+        # Percent + legend label (Grade + Count + %)
+        grade_counts["Percent"] = (grade_counts["Count"] / total * 100).round(1)
+        grade_counts["LegendLabel"] = (
+            grade_counts["Grade"].astype(str)
+            + "  "
+            + grade_counts["Count"].astype(int).astype(str)
+            + " ("
+            + grade_counts["Percent"].astype(str)
+            + "%)"
+        )
+
         fig = px.pie(
             grade_counts,
-            names="Grade",
+            names="LegendLabel",     # ✅ legend shows Grade + count + %
             values="Count",
             hole=0.55,
-            color="Grade",
+            color="Grade",          # ✅ keep correct colors per grade
             color_discrete_map=grade_colors,
-            category_orders={"Grade": grade_order},
         )
 
         fig.update_traces(
             sort=False,
             direction="clockwise",
-            rotation=0,  # start at 12:00
+            rotation=0,  # ✅ start at 12:00 (00:00)
             textinfo="none",
-            hovertemplate="<b>%{label}</b><br>Count: %{value}<br>%{percent}<extra></extra>"
-        )
-        fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), showlegend=False)
-
-        legend_rows = []
-        for g in grade_order:
-            c = int(counts[g])
-            if c == 0:
-                continue
-            pct = (c / total * 100) if total else 0.0
-            legend_rows.append(
-                html.Div(
-                    style={"display": "flex", "alignItems": "center", "justifyContent": "space-between",
-                           "gap": "10px", "padding": "2px 0"},
-                    children=[
-                        html.Div(
-                            style={"display": "flex", "alignItems": "center", "gap": "8px"},
-                            children=[
-                                html.Span("●", style={"color": grade_colors[g], "fontSize": "14px"}),
-                                html.Span(g, style={"fontWeight": "700", "fontSize": "12px"}),
-                            ],
-                        ),
-                        html.Span(f"{c}  ({pct:.1f}%)", style={"fontSize": "12px", "color": "#374151"}),
-                    ],
-                )
-            )
-
-        pie_cards.append(
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody([
-                        html.Div(prog, style={"fontWeight": "700", "fontSize": "13px", "marginBottom": "10px"}),
-                        html.Div(
-                            style={"display": "grid", "gridTemplateColumns": "1.2fr 1fr", "gap": "10px",
-                                   "alignItems": "center"},
-                            children=[
-                                dcc.Graph(figure=fig, config={"displayModeBar": False}, style={"height": "240px"}),
-                                html.Div(style={"borderLeft": "1px solid #e5e7eb", "paddingLeft": "10px"},
-                                         children=legend_rows)
-                            ]
-                        )
-                    ]),
-                    className="shadow-sm",
-                    style={"borderRadius": "14px"}
-                ),
-                width=6
-            )
+            texttemplate="%{value} (%{percent})",  # ✅ number + percent on slices
+            textposition="inside",
+            hovertemplate="<b>%{label}</b><br>Count: %{value}<br>%{percent}<extra></extra>",
         )
 
-    pie_grid = dbc.Row(pie_cards, className="g-2")
+        fig.update_layout(
+            showlegend=True,
+            legend_title_text="",
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
 
-    return (
-        k1, k2, k3, k4, k5,
-        fig_trend, fig_top_mean, fig_std, fig_top_max,
-        fig_module,
-        pie_grid
-    )
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8050, debug=False)
-
+        row_cols[j].markdown(f"**{prog}**")
+        row_cols[j].plotly_chart(fig, use_container_width=True)
