@@ -205,67 +205,74 @@ col3.metric("Highest Max Score", f"{dff['Max'].max():.2f}" if len(dff) else "—
 col4.metric("Average StdDev", f"{dff['StdDev'].mean():.2f}" if len(dff) else "—")
 col5.metric("Records Used", f"{len(dff_raw):,}")
 
-# Charts
-st.subheader("Score Distribution Trend by Program (Median)")
+# ----------------------------
+# Charts (UPDATED AS REQUESTED)
+# ----------------------------
 
-# ✅ sort by Median decreasing so the line goes down
-dff_trend = (
-    dff.dropna(subset=["Median"])
-      .sort_values("Median", ascending=False)
+# ✅ Standard Deviation by Program (LINE graph)
+st.subheader("Standard Deviation by Program (Trend Line)")
+
+std_trend = (
+    dff.dropna(subset=["StdDev"])
+       .sort_values("StdDev", ascending=False)  # keep the "downward" feel
 )
 
-fig_trend = px.line(
-    dff_trend,
+fig_std_line = px.line(
+    std_trend,
     x="ProgramName",
-    y="Median",
+    y="StdDev",
     markers=True,
     title=""
 )
-fig_trend.update_layout(
+fig_std_line.update_layout(
     xaxis_title="Program Name",
-    yaxis_title="Median Mark",
+    yaxis_title="Standard Deviation",
     xaxis_tickangle=-30
 )
-st.plotly_chart(fig_trend, use_container_width=True)
+st.plotly_chart(fig_std_line, use_container_width=True)
 
-
+# ✅ Same row:
+# Left = Top Programs by Mean
+# Right = Score Distribution Trend by Program (Median) as BAR chart (like old StdDev histogram)
 cA, cB = st.columns(2)
 
 with cA:
     st.subheader("Top Programs by Mean Score (Average)")
     top_mean = dff.dropna(subset=["Mean"]).head(int(top_n))
-    fig_top_mean = px.bar(top_mean.iloc[::-1], x="Mean", y="ProgramName", orientation="h", title="")
-    st.plotly_chart(fig_top_mean, use_container_width=True)
-
-with cB:
-    st.subheader("Standard Deviation by Program")
-
-    # ✅ Sort by StdDev descending
-    std_df = (
-        dff.dropna(subset=["StdDev"])
-            .sort_values("StdDev", ascending=False)
-            .head(int(top_n))
-    )
-
-    fig_std = px.bar(
-        std_df,
-        x="StdDev",
+    fig_top_mean = px.bar(
+        top_mean.iloc[::-1],
+        x="Mean",
         y="ProgramName",
         orientation="h",
         title=""
     )
+    st.plotly_chart(fig_top_mean, use_container_width=True)
 
-    # Optional: highest at top
-    fig_std.update_layout(yaxis=dict(autorange="reversed"))
+with cB:
+    st.subheader("Score Distribution Trend by Program (Median)")
 
-    st.plotly_chart(fig_std, use_container_width=True)
+    median_bar = (
+        dff.dropna(subset=["Median"])
+           .sort_values("Median", ascending=False)
+           .head(int(top_n))
+    )
+
+    fig_median_bar = px.bar(
+        median_bar,
+        x="Median",
+        y="ProgramName",
+        orientation="h",
+        title=""
+    )
+    fig_median_bar.update_layout(yaxis=dict(autorange="reversed"))
+    st.plotly_chart(fig_median_bar, use_container_width=True)
+
+# ❌ Removed: Top Programs by Maximum Score
 
 
-st.subheader("Top Programs by Maximum Score")
-top_max = dff.sort_values("Max", ascending=False, na_position="last").head(int(top_n)).dropna(subset=["Max"])
-fig_top_max = px.bar(top_max.iloc[::-1], x="Max", y="ProgramName", orientation="h", title="")
-st.plotly_chart(fig_top_max, use_container_width=True)
-
+# ----------------------------
+# Module Statistics
+# ----------------------------
 st.subheader("Module Statistics")
 
 colA, colB = st.columns([2, 1])
@@ -293,7 +300,6 @@ top_modules = (
            .head(int(module_top_n))
 )
 
-# ✅ Increase chart height when module count increases
 dynamic_height = max(450, 40 * len(top_modules))
 
 fig_module = px.bar(
@@ -311,7 +317,9 @@ fig_module.update_layout(
 
 st.plotly_chart(fig_module, use_container_width=True)
 
+# ----------------------------
 # Donuts
+# ----------------------------
 st.subheader("Grade Distribution by Program")
 
 grade_order = ["A*", "A", "B", "C", "D", "E", "F"]
@@ -339,13 +347,11 @@ for i in range(0, len(programs_to_draw), 2):
         grade_counts = counts.reset_index()
         grade_counts.columns = ["Grade", "Count"]
 
-        # Force order
         grade_counts["Grade"] = pd.Categorical(
             grade_counts["Grade"], categories=grade_order, ordered=True
         )
         grade_counts = grade_counts.sort_values("Grade")
 
-        # Percent + legend label (Grade + Count + %)
         grade_counts["Percent"] = (grade_counts["Count"] / total * 100).round(1)
         grade_counts["LegendLabel"] = (
             grade_counts["Grade"].astype(str)
@@ -358,19 +364,19 @@ for i in range(0, len(programs_to_draw), 2):
 
         fig = px.pie(
             grade_counts,
-            names="LegendLabel",     # ✅ legend shows Grade + count + %
+            names="LegendLabel",
             values="Count",
             hole=0.55,
-            color="Grade",          # ✅ keep correct colors per grade
+            color="Grade",
             color_discrete_map=grade_colors,
         )
 
         fig.update_traces(
             sort=False,
             direction="clockwise",
-            rotation=0,  # ✅ start at 12:00 (00:00)
+            rotation=0,
             textinfo="none",
-            texttemplate="%{value} (%{percent})",  # ✅ number + percent on slices
+            texttemplate="%{value} (%{percent})",
             textposition="inside",
             hovertemplate="<b>%{label}</b><br>Count: %{value}<br>%{percent}<extra></extra>",
         )
